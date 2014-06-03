@@ -284,7 +284,7 @@ class D(SubCommand):
 
         #\TODO Get pid from config file....
         PIDFILE='/var/run/DP-d.pid'
-        if os.path.exists(PID):
+        if os.path.exists(PIDFILE):
             sys.exit("pid file (%s) already exists" % PIDFILE)
 
         try:
