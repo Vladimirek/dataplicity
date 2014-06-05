@@ -1,1 +1,1 @@
-from .app import App
+from dataplicity.app.app import App

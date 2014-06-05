@@ -14,10 +14,12 @@ import sys
 import os
 import time
 import socket
-import SocketServer
 from threading import Event, Thread
 from os.path import abspath
 import logging
+
+
+log = logging.getLogger('dataplicity')
 
 
 class Daemon(object):
@@ -40,36 +42,14 @@ class Daemon(object):
 
         self.poll_rate_seconds = conf.get_float("daemon", "poll", 60.0)
         self.last_check_time = None
+        self.pid_path = abspath(conf.get('daemon', 'pidfile', '/var/run/dataplicity.pid'))
+        self.pipe_path = abspath(conf.get('daemon', 'pipe', '/tmp/dataplicitypipe'))
 
         self.server_closing_event = Event()
 
         # Command to execute with the daemon exits
         self.exit_command = None
         self.exit_event = Event()
-        self._server = None
-        self._server_thread = None
-
-    def _server_loop(self):
-        class daemonTCPHandler(SocketServer.BaseRequestHandler):
-            def handle(self):
-                self.log = logging.getLogger('dataplicity')
-                self.log.debug("Process Daemon command request")
-                try:
-                    command = self.request.recv(128).rstrip('\n')
-                    if command:
-                        self.log.debug("Invoke command (%s)" % command)
-                        reply = self.server.DP_daemon.on_client_command(command)
-                        self.log.debug("Got response (%s)" % reply)
-                        if reply is not None:
-                            self.request.sendall(reply.rstrip('\n') + '\n')
-                except socket.error:
-                    pass
-
-        self._server = SocketServer.TCPServer(('127.0.0.1', 8888), daemonTCPHandler)
-        self._server.DP_daemon = self
-        self.log.debug("Start daemon at 8888")
-        self._server.serve_forever()
-        self.log.debug("Stopped daemon at 8888")
 
     def _push_wait(self, client, event, sync_func):
         client.connect_wait(event, sync_func)
@@ -81,7 +61,25 @@ class Daemon(object):
 
     def start(self):
 
+        pipe = None
+        if self.pipe_path:
+            try:
+                os.mkfifo(self.pipe_path)
+                self.log.debug("create named pipe '{}'".format(self.pipe_path))
+            except:
+                pass
+
+            try:
+                pipe = os.open(self.pipe_path, os.O_RDONLY | os.O_NONBLOCK)
+            except:
+                self.log.exception('unable to open pipe')
+                pass
+            else:
+                self.log.debug('opened pipe "{}" ({})'.format(self.pipe_path, pipe))
+
         self.log.debug('starting dataplicity service with conf {}'.format(self.conf_path))
+
+        #server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
         self.client.tasks.start()
         self.log.debug('ready')
@@ -92,46 +90,48 @@ class Daemon(object):
         sync_push_thread.daemon = True
         try:
             sync_push_thread.start()
-            try:
-                self._server_thread = Thread( target=self._server_loop)
-                self._server_thread.start()
-
-            except:
-                self.log.exception('unable to start dataplicity daemon')
-                return -1
 
             try:
-                while not self.exit_event.isSet():
+                while not self.exit_event.is_set():
                     try:
                         self.poll(time.time())
                     except ClientException:
                         raise
                     except Exception as e:
                         self.log.exception('error in poll')
-                    time.sleep(1)
+
+                    start = time.time()
+                    # Loop until another poll is due, or exit is requested
+                    while time.time() - start < self.poll_rate_seconds and not self.exit_event.is_set():
+                        if pipe is not None:
+                            command = os.read(pipe, 128)
+                            if command:
+                                command = command.splitlines()[-1].rstrip('\n')
+                                self.log.debug('command pipe received {}'.format(command))
+                                success = self.on_client_command(command)
+                        self.exit_event.wait(0.1)
 
             except SystemExit:
                 self.log.debug("exit requested")
+                return
 
             except KeyboardInterrupt:
                 self.log.debug("user Exit")
-
-            self._stop_threads()
-            return
+                return
 
         except ForceRestart:
             self.log.info('restarting...')
-            self._stop_threads()
             self.exit(' '.join(sys.argv))
 
         except Exception as e:
             self.log.exception('error in daemon main loop')
 
         finally:
-            try:
-                self._stop_threads()
-            except Exception as e:
-                self.log.exception(e)
+            if pipe:
+                try:
+                    os.close(pipe)
+                except:
+                    self.log.exception('error closing pipe')
 
             self.log.debug("closing")
             self.server_closing_event.set()
@@ -143,19 +143,9 @@ class Daemon(object):
                 self.log.debug("Executing %s" % self.exit_command)
                 os.system(self.exit_command)
 
-    def _stop_threads(self):
-        if self._server:
-            self._server.shutdown()
-            self._server = None
-        if self._server_thread:
-            self._server_thread.join()
-            self._server_thread = None
-
 
     def poll(self, t):
-        if (not self.last_check_time) or (self.poll_rate_seconds < t-self.last_check_time):
-          self.sync_now(t)
-          self.last_check_time = t #VP:maybe time.time() is better, include sync time?
+        self.sync_now(t)
 
     def sync_now(self, t=None):
         if t is None:
@@ -167,56 +157,31 @@ class Daemon(object):
         except Exception:
             self.log.exception('sync failed')
 
-    def handle_client_command(self, client):
-        """Read lines sent by client"""
-        #client.setblocking(False)
-        try:
-            try:
-                command = client.recv(128).rstrip('\n')
-                if command:
-                    reply = self.on_client_command(command)
-                    if reply is not None:
-                        client.sendall(reply.rstrip('\n') + '\n')
-            except socket.error:
-                pass
-
-        finally:
-            if client is not None:
-                client.shutdown(socket.SHUT_RDWR)
-                client.close()
-
     def on_client_command(self, command):
         if command == 'RESTART':
             self.log.info('restart requested')
             self.exit(' '.join(sys.argv))
-            return "OK"
+            return True
 
         elif command == 'STOP':
             self.log.info('stop requested')
             self.exit()
-            return "OK"
+            return True
 
         elif command == "SYNC":
             self.log.info('sync requested')
             try:
                 self.sync_now()
             except Exception as e:
-                return str(e)
+                return self.log.exception('error on_client_command SYNC')
             else:
-                return "OK"
+                return True
 
         elif command == "STATUS":
             self.log.info('status requested')
-            return "running"
+            return True
 
-        return "BADCOMMAND"
-
-
-# class FlushFile(file):
-#     def write(self, data):
-#         ret = super(FlushFile, self).write(data)
-#         self.flush()
-#         return ret
+        return False
 
 
 class D(SubCommand):
@@ -239,6 +204,12 @@ class D(SubCommand):
         parser.add_argument('-y', '--sync', dest="sync", action="store_true", default=False,
                             help="sync now")
 
+    def get_conf(self):
+        conf_path = self.args.conf or constants.CONF_PATH
+        conf_path = abspath(conf_path)
+        conf = settings.read(conf_path)
+        return conf
+
     def make_daemon(self, debug=None):
         conf_path = self.args.conf or constants.CONF_PATH
         conf_path = abspath(conf_path)
@@ -247,6 +218,7 @@ class D(SubCommand):
         firmware_conf_path = conf.get('daemon', 'conf', conf_path)
         # It may not exist if there is no installed firmware
         if os.path.exists(firmware_conf_path):
+            log.error("daemon firmware conf '{}' does not exist".format(firmware_conf_path))
             conf_path = firmware_conf_path
 
         if debug is None:
@@ -275,25 +247,24 @@ class D(SubCommand):
             return 0
 
         if args.status:
-            running, msg = self.comms.status()
-            if not running:
-                sys.stdout.write('not running\n')
+            if self.comms.status():
+                sys.stdout.write('running\n')
+                return 0
             else:
-                sys.stdout.write(msg + '\n')
-            return 0
-
-        #\TODO Get pid from config file....
-        PIDFILE='/var/run/DP-d.pid'
-        if os.path.exists(PIDFILE):
-            sys.exit("pid file (%s) already exists" % PIDFILE)
+                sys.stdout.write('not running\n')
+                return 1
 
         try:
             if args.foreground:
                 dataplicity_daemon = self.make_daemon()
                 dataplicity_daemon.start()
             else:
-                #daemon_context = DaemonContext(pidfile=TimeoutPIDLockFile(PIDFILE, 1),stderr=sys.stderr) #logs forced to console.
-                daemon_context = DaemonContext(pidfile=TimeoutPIDLockFile(PIDFILE, 1))
+                conf = self.get_conf()
+                pid_path = conf.get('daemon', 'pid_path', constants.PID_PATH)
+                if not os.access(pid_path, os.R_OK):
+                    sys.stderr.write('no permission to access pid file "{}"\n'.format(pid_path))
+                    return -1
+                daemon_context = DaemonContext(pidfile=TimeoutPIDLockFile(pid_path, 1), stderr=sys.stderr)
                 with daemon_context:
                     dataplicity_daemon = self.make_daemon()
                     dataplicity_daemon.start()
@@ -301,3 +272,4 @@ class D(SubCommand):
         except Exception, e:
             from traceback import print_exc
             print_exc(e)
+            return -1

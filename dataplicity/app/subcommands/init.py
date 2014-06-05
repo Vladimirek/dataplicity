@@ -152,7 +152,7 @@ class Init(SubCommand):
                          "class": args.cls or 'default',
                          "auth_token": auth_token,
                          "auto_device_text": auto,
-                         "subdomain": auto_device_subdomain,
+                         "subdomain": auto_device_subdomain or '',
                          "SERVER_URL": args.server or constants.SERVER_URL,
                          "SETTINGS_PATH": constants.SETTINGS_PATH,
                          "FIRMWARE_PATH": constants.FIRMWARE_PATH,

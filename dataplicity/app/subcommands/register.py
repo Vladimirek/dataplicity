@@ -9,8 +9,8 @@ log = logging.getLogger('dataplicity')
 
 
 class Register(SubCommand):
-    """Register this device"""
-    help = "Register this device"
+    """Register this device with the Dataplicity server"""
+    help = __doc__
 
     def add_arguments(self, parser):
         parser.add_argument('--auth', dest="auth", metavar="AUTH TOKEN", default=None, required=False,

@@ -1,4 +1,4 @@
-import socket
+import os
 
 
 class CommsError(Exception):
@@ -6,25 +6,19 @@ class CommsError(Exception):
 
 
 class Comms(object):
-    """Communicates with the dataplicity daemon"""
 
-    def __init__(self, ip='127.0.0.1', port=8888):
-        self.ip = ip
-        self.port = port
+    def __init__(self, pipe_path='/tmp/dataplicitypipe'):
+        self.pipe_path = pipe_path
 
     def __call__(self, command):
-        sock = None
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect((self.ip, self.port))
-            sock.sendall("%s\n" % command.upper())
-            data = sock.recv(128)
-            return data.rstrip('\n')
-
+            pipe = os.open(self.pipe_path, os.O_WRONLY | os.O_NONBLOCK)
+        except:
+            raise CommsError("Unable to connect to server via named pipe '{}'".format(self.pipe_path))
+        try:
+            os.write(pipe, command + '\n')
         finally:
-            if sock is not None:
-                sock.close()
-        return True
+            os.close(pipe)
 
     def sync(self):
         return self('SYNC')
@@ -37,6 +31,8 @@ class Comms(object):
 
     def status(self):
         try:
-            return True, self('STATUS')
+            self('STATUS')
         except:
-            return False, ''
+            return False
+        else:
+            return True

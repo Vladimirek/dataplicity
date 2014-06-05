@@ -109,7 +109,7 @@ def install(device_class, version, firmware_fs, dst_fs):
     return install_path
 
 
-def install_encoded(device_class, version, firmware_b64, activate_fw=True):
+def install_encoded(device_class, version, firmware_b64, activate_firmware=True):
     """Install firmware from a b64 encoded zip file"""
     # TODO:  implement this in a less memory hungry way
     # decode from b64
@@ -123,7 +123,7 @@ def install_encoded(device_class, version, firmware_b64, activate_fw=True):
     # Install
     install_path = install(device_class, version, firmware_fs, dst_fs)
     # Move symlink to active firmware
-    if activate_fw:
+    if activate_firmware:
         activate(device_class, version, dst_fs)
 
     # Clean up any temporary files

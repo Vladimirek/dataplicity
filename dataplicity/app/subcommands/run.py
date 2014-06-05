@@ -20,5 +20,5 @@ class Run(SubCommand):
 
     def run(self):
         dataplicity_daemon = self.make_daemon()
-        dataplicity_daemon.sync_now()
+        #dataplicity_daemon.sync_now()
         dataplicity_daemon.start()
